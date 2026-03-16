@@ -8,6 +8,7 @@ from tourists import TouristEmissaries
 from equilibrium import VarianceEquilibrium
 from orbital_map import OrbitalMap
 from player import PlayerState
+from proposals import CommsQueue, generate_rival_proposal, generate_tourist_proposal, generate_bounty
 from flavor import get_flavor, get_game_over_flavor, SoundBank
 from ui import (
     TerminalLog, MarketTicker, EquilibriumBar, MessagePanel,
@@ -51,6 +52,9 @@ def build_game_state(lattice, market, equilibrium, rivals, tourists, player=None
         gs["player_abilities"] = dict(player.abilities)
         gs["player_notoriety"] = player.notoriety
         gs["player_resources"] = player.resources
+        gs["player_upgrades"] = dict(player.upgrades)
+        gs["leisure_tourist_mult"] = player.leisure_tourist_mult()
+        gs["leisure_extended_stay"] = player.leisure_extended_stay()
     return gs
 
 
@@ -73,6 +77,7 @@ def main():
     tourists = TouristEmissaries()
     equilibrium = VarianceEquilibrium()
     player = PlayerState()
+    comms = CommsQueue()
 
     # UI panels
     terminal = TerminalLog(TERMINAL_RECT, font)
@@ -135,23 +140,120 @@ def main():
                                          "diplomacy", "research", "broadcast") else "-"
                 tlog(f"  {name:<12} {desc}  [eq:{sign}]", GREEN)
             tlog(f"  {'SIMULATE':<12} Preview: SIMULATE <CMD>", GREEN)
+            tlog(f"  {'RESPOND':<12} RESPOND ACCEPT/DENY — reply to comms", GREEN)
+            tlog(f"  {'BOUNTIES':<12} Show active bounties", GREEN)
             tlog(f"  {'STATUS':<12} Show abilities & connections", GREEN)
             tlog(f"  {'HELP':<12} Show this list", GREEN)
             tlog("----------------", HIGHLIGHT)
             return
 
         if cmd == "STATUS":
-            tlog("--- PLAYER STATUS ---", HIGHLIGHT)
-            tlog(f"  {player.get_ability_line()}", CYAN)
-            tlog("  CONNECTIONS:", GREEN)
-            for line in player.get_connection_summary(rivals):
-                tlog(line, GREEN)
-            tlog("---------------------", HIGHLIGHT)
+            if args:
+                # STATUS <target> — look up a rival by name fragment
+                target_rival = None
+                search = args.upper()
+                for r in rivals.rivals:
+                    if search in r.name.upper():
+                        target_rival = r
+                        break
+                if not target_rival:
+                    tlog(f"Unknown target: {args}", WARN_RED)
+                    tlog(f"  Known: {', '.join(r.name for r in rivals.rivals)}", DIM_GREEN)
+                    return
+
+                tlog(f"--- {target_rival.name.upper()} ---", HIGHLIGHT)
+                tlog(f"  Moon: {target_rival.moon}", GREEN)
+                tlog(f"  Personality: aggro={target_rival.aggressive:.1f}"
+                     f"  sneaky={target_rival.sneaky:.1f}"
+                     f"  diplo={target_rival.diplomatic:.1f}", GREEN)
+                tlog(f"  Reputation: {target_rival.reputation:+.2f}", GREEN)
+                tlog(f"  Last action: {target_rival.last_action}", GREEN)
+
+                conn = player.connections.get(target_rival.name)
+                if conn:
+                    trade_status = "OPEN" if conn.open_trade else "closed"
+                    tlog(f"  Trade line: {trade_status}", CYAN if conn.open_trade else DIM_GREEN)
+                    tlog(f"  Trust: {conn.trust:+.2f}", GREEN)
+                    if conn.grudge_ticks > 0:
+                        tlog(f"  GRUDGE: {conn.grudge_ticks} ticks remaining", WARN_RED)
+                    tlog(f"  History: {conn.times_traded} trades, {conn.times_heisted} heists",
+                         GREEN)
+                    if conn.eavesdropped:
+                        tlog(f"  Intel: Currently tapping comms", CYAN)
+                else:
+                    tlog(f"  No connection established.", DIM_GREEN)
+
+                # What's at that moon right now?
+                for t in tourists.tourists:
+                    if t.position == target_rival.moon:
+                        tlog(f"  Tourist present: {t.name} ({t.personality})", COOL_BLUE)
+
+                # Active bounties targeting this rival
+                for b in comms.get_active_bounties():
+                    if b.target_name and b.target_name.upper() in target_rival.name.upper():
+                        tlog(f"  BOUNTY: {b.text} (${b.reward}, {b.timer}t)", HIGHLIGHT)
+
+                tlog(f"---{'─' * len(target_rival.name)}---", HIGHLIGHT)
+            else:
+                tlog("--- PLAYER STATUS ---", HIGHLIGHT)
+                tlog(f"  {player.get_ability_line()}", CYAN)
+                tlog("  INFRASTRUCTURE:", HIGHLIGHT)
+                for line in player.get_upgrade_summary():
+                    tlog(line, GREEN)
+                tlog("  CONNECTIONS:", GREEN)
+                for line in player.get_connection_summary(rivals):
+                    tlog(line, GREEN)
+                if player.research_focus_tag:
+                    tlog(f"  Research focus: {player.research_focus_tag.upper()}", CYAN)
+                tlog("  Type STATUS <name> for rival details", DIM_GREEN)
+                tlog("---------------------", HIGHLIGHT)
+            return
+
+        if cmd == "RESPOND":
+            if args and args.upper() in ("ACCEPT", "A", "YES", "Y"):
+                accept = True
+            elif args and args.upper() in ("DENY", "D", "NO", "N"):
+                accept = False
+            else:
+                # Show what's pending
+                active = comms.get_active_proposals()
+                if not active:
+                    tlog("No active proposals. Use BOUNTIES to see bounties.", DIM_GREEN)
+                else:
+                    for p in active:
+                        tlog(f"  COMMS [{p.timer}t]: {p.text}", HIGHLIGHT)
+                    tlog("  Type RESPOND ACCEPT or RESPOND DENY", DIM_GREEN)
+                return
+
+            events, proposal = comms.respond(accept, player, equilibrium)
+            tag = "ACCEPTED" if accept else "DENIED"
+            color = COOL_BLUE if accept else WARN_RED
+            if proposal:
+                tlog(f">>> RESPOND {tag}: {proposal.text}", color)
+                sounds.play("command")
+            for e in events:
+                tlog(e, color)
+            if proposal:
+                elog(f"COMMS: {tag} — {proposal.sender}", color)
+            return
+
+        if cmd == "BOUNTIES":
+            active = comms.get_active_bounties()
+            tlog("--- ACTIVE BOUNTIES ---", HIGHLIGHT)
+            if not active:
+                tlog("  No active bounties. One may appear soon.", DIM_GREEN)
+            for b in active:
+                tlog(f"  [{b.timer}t] {b.text}  (${b.reward})", HIGHLIGHT)
+                tlog(f"    From: Node C{b.source_moon} — requires: {b.action_required.upper()}", DIM_GREEN)
+            tlog(f"  Completed bounties: {comms.completed_bounties}", GREEN)
+            tlog("-----------------------", HIGHLIGHT)
             return
 
         if cmd == "SIMULATE":
             action, target = args
-            lines = run_simulate(action, lattice, market, equilibrium, rivals, player)
+            # Pass tag for RESEARCH simulations
+            sim_tag = target.lower() if target and action == "RESEARCH" else None
+            lines = run_simulate(action, lattice, market, equilibrium, rivals, player, tag=sim_tag)
             for line in lines:
                 tlog(line, CYAN)
             return
@@ -161,6 +263,104 @@ def main():
             return
 
         desc, eq_action, chaos_tags = COMMANDS[cmd]
+
+        # ── BUILD: infrastructure upgrades ──
+        if eq_action == "build":
+            from player import UPGRADE_DEFS
+            upgrade_type = args  # already lowercased by parse_command
+
+            if not upgrade_type:
+                tlog("--- INFRASTRUCTURE ---", HIGHLIGHT)
+                for line in player.get_upgrade_summary():
+                    tlog(line, GREEN)
+                tlog("  Usage: BUILD DRONES / BUILD CLUSTERS / BUILD LEISURE", DIM_GREEN)
+                return
+
+            if upgrade_type not in UPGRADE_DEFS:
+                tlog(f"ERROR: Unknown upgrade: '{upgrade_type}'", WARN_RED)
+                tlog(f"  Available: DRONES, CLUSTERS, LEISURE", DIM_GREEN)
+                return
+
+            success, b_events = player.build_upgrade(upgrade_type)
+            color = COOL_BLUE if success else WARN_RED
+            for e in b_events:
+                tlog(e, color)
+            if success:
+                sounds.play("trade")
+                elog(f"BUILT: {upgrade_type.upper()} Lv{player.upgrades[upgrade_type]}", HIGHLIGHT)
+            return
+
+        # ── RESEARCH: directed at a tech tag, not a rival ──
+        if eq_action == "research":
+            from lattice import TAGS as ALL_TAGS
+            tag = args.lower() if args else None
+
+            # No tag = unfocused (random)
+            if not tag:
+                tag = random.choice(ALL_TAGS)
+                tlog(f">>> RESEARCH (unfocused — defaulting to '{tag}')", CYAN)
+            elif tag not in ALL_TAGS:
+                tlog(f"ERROR: Unknown research field: '{tag}'", WARN_RED)
+                tlog(f"  Available: {', '.join(ALL_TAGS)}", DIM_GREEN)
+                return
+            else:
+                tlog(f">>> RESEARCH {tag.upper()}", COOL_BLUE)
+
+            # Resolve through player ability system (no target rival)
+            success, p_events, eq_modifier = player.resolve_action(
+                eq_action, target_rival=None, lattice=lattice, tourists=tourists
+            )
+
+            # Apply equilibrium
+            from equilibrium import ACTION_IMPACTS
+            base_delta = ACTION_IMPACTS.get(eq_action, 0.0)
+            adjusted_delta = base_delta * eq_modifier
+            equilibrium.value = max(-1.0, min(1.0, equilibrium.value + adjusted_delta))
+
+            result_tag = "SUCCESS" if success else "FAILED"
+            result_color = COOL_BLUE if success else WARN_RED
+            tlog(f"    Result: {result_tag}", result_color)
+            tlog(f"    {desc}", result_color)
+
+            for e in p_events:
+                color = GREEN if success else WARN_RED
+                if "CRITICAL" in e:
+                    color = WARN_RED
+                elif "SUCCESS" in e:
+                    color = COOL_BLUE
+                tlog(f"  {e}", color)
+
+            # On success, push the targeted tag in the lattice
+            if success:
+                # Set focus tag for cluster passive trickle
+                player.research_focus_tag = tag
+                # Apply cluster research multiplier
+                strength = 3.0 * player.cluster_research_mult()
+                research_events = lattice.research_directed(tag, strength=strength)
+                for e in research_events:
+                    tlog(f"    {e}", HIGHLIGHT)
+                    if "BREAKTHROUGH" in e:
+                        elog(e, HIGHLIGHT)
+                        sounds.play("golden_age")
+            else:
+                tlog(f"    Research stalled — no progress on '{tag}'.", DIM_GREEN)
+
+            tlog(f"    Equilibrium: {equilibrium.value:+.3f} (delta:{adjusted_delta:+.3f})", COOL_BLUE)
+            tlog(f"    {player.get_ability_line()}", DIM_GREEN)
+            sounds.play("command")
+
+            # Check bounty completion (research bounties)
+            if success:
+                bounty_events = comms.check_bounty_completion("research", None, player)
+                for e in bounty_events:
+                    tlog(e, HIGHLIGHT)
+                    elog(e, HIGHLIGHT)
+                    sounds.play("trade")
+
+            elog(f"PLAYER: RESEARCH {tag.upper()} {result_tag} (eq={equilibrium.value:+.2f})", result_color)
+            return
+
+        # ── All other actions: rival-targeted ──
 
         # Pick target rival (from args or random)
         target_rival = player.get_target_rival(rivals, args)
@@ -243,6 +443,15 @@ def main():
             if target_rival:
                 target_rival.reputation += 0.03  # extra for target
             tlog("    Rival relations improved.", GREEN)
+
+        # Check bounty completion
+        if success:
+            target_name = target_rival.name if target_rival else None
+            bounty_events = comms.check_bounty_completion(eq_action, target_name, player)
+            for e in bounty_events:
+                tlog(e, HIGHLIGHT)
+                elog(e, HIGHLIGHT)
+                sounds.play("trade")
 
         elog(f"PLAYER: {cmd} {result_tag} (eq={equilibrium.value:+.2f})", result_color)
 
@@ -346,9 +555,33 @@ def main():
                         if random.random() < 0.3:
                             tlog(f'  "{get_flavor("rival_heist")}"', (140, 140, 140))
                 # Rival actions: reduced eq impact (only heists/spies matter)
+                # Also check if rival heists target the PLAYER (based on grudge/aggro)
                 for r in rivals.rivals:
                     if r.last_action == "heist":
                         equilibrium.action_impact("heist")
+                        # Chance rival targets player instead of another rival
+                        conn = player.connections.get(r.name)
+                        targets_player = False
+                        if conn and conn.grudge_ticks > 0:
+                            targets_player = random.random() < 0.4 + r.aggressive * 0.3
+                        elif r.reputation < -0.2:
+                            targets_player = random.random() < 0.15
+                        if targets_player:
+                            # Drone intercept check
+                            if random.random() < player.drone_intercept_chance():
+                                tlog(f"  DRONES intercept raid from {r.name}!", CYAN)
+                                elog(f"DRONES: Intercepted {r.name}", CYAN)
+                                if player.drone_retaliates():
+                                    r.reputation -= 0.08
+                                    tlog(f"  Auto-retaliate: {r.name} rep -{0.08:.2f}", DIM_GREEN)
+                            else:
+                                raid_loss = 8 + r.aggressive * 12 + random.uniform(0, 8)
+                                player.resources = max(0, player.resources - raid_loss)
+                                tlog(f"  RAIDED by {r.name}! Lost {raid_loss:.0f} resources.", WARN_RED)
+                                elog(f"RAIDED by {r.name}! -{raid_loss:.0f}$", WARN_RED)
+                                sounds.play("heist")
+                                if conn:
+                                    conn.grudge_ticks = max(0, conn.grudge_ticks - 3)
                     elif r.last_action == "spy":
                         equilibrium.action_impact("spy")
                     elif r.last_action == "trade":
@@ -382,11 +615,84 @@ def main():
                     neg = equilibrium.value < 0
                     tlog(f'"{get_game_over_flavor(neg)}"', WARN_RED)
 
-                # 6. Player passive updates
+                # 6. Proposals & Bounties
+                # Tick existing proposals/bounties
+                comms_events = comms.tick(player, equilibrium)
+                for e in comms_events:
+                    if "EXPIRED" in e or "ignored" in e:
+                        tlog(e, WARN_RED)
+                        elog(e, WARN_RED)
+                    else:
+                        tlog(e, DIM_GREEN)
+
+                # Generate new proposals from rivals (chance per rival per tick)
+                if comms.can_spawn():
+                    for r in rivals.rivals:
+                        if random.random() < 0.04:  # ~4% per rival per tick
+                            props = generate_rival_proposal(r, player, equilibrium)
+                            for p in props:
+                                if comms.add_proposal(p):
+                                    tlog(f"COMMS [{p.timer}t]: {p.text}", HIGHLIGHT)
+                                    tlog(f"  Type RESPOND ACCEPT or RESPOND DENY", DIM_GREEN)
+                                    elog(f"INCOMING: {p.sender}", HIGHLIGHT)
+                                    sounds.play("tourist")
+                                    comms.set_cooldown(8)  # don't spam
+                                    break
+                        if not comms.can_spawn():
+                            break
+
+                    # Tourist proposals when visiting
+                    for t in tourists.tourists:
+                        if t.at_player_moon() and random.random() < 0.15:
+                            p = generate_tourist_proposal(t, equilibrium.value)
+                            if p and comms.add_proposal(p):
+                                tlog(f"COMMS [{p.timer}t]: {p.text}", CYAN)
+                                tlog(f"  Type RESPOND ACCEPT or RESPOND DENY", DIM_GREEN)
+                                elog(f"INCOMING: {p.sender}", CYAN)
+                                sounds.play("tourist")
+                                comms.set_cooldown(5)
+
+                # Generate bounties (~every 20-35 ticks)
+                if not comms.get_active_bounties() and random.random() < 0.04:
+                    bounty = generate_bounty(rivals, lattice, tick)
+                    if comms.add_bounty(bounty):
+                        tlog(f"BOUNTY [{bounty.timer}t]: {bounty.text}", HIGHLIGHT)
+                        tlog(f"  Reward: ${bounty.reward} from Node C{bounty.source_moon}", HIGHLIGHT)
+                        tlog(f"  Complete: {bounty.action_required.upper()} {bounty.target_name}", DIM_GREEN)
+                        elog(f"NEW BOUNTY: ${bounty.reward}", HIGHLIGHT)
+                        sounds.play("command")
+
+                # 7. Player passive updates
                 for e in player.tick_update():
                     tlog(e, WARN_RED if "LOW" in e or "BANKRUPT" in e else DIM_GREEN)
 
-                # 7. Scoring
+                # 7b. Cluster passive: lattice trickle on focus tag
+                trickle = player.cluster_trickle_rate()
+                if trickle > 0 and player.research_focus_tag:
+                    lattice.research_directed(player.research_focus_tag, strength=trickle)
+                    # Silent — only log breakthroughs
+                    for e in lattice.events:
+                        if "BREAKTHROUGH" in e:
+                            tlog(f"  CLUSTER: {e}", HIGHLIGHT)
+                            elog(e, HIGHLIGHT)
+
+                # 7c. Leisure passive: income when tourists visit + sigint
+                if player.leisure_income_rate() > 0:
+                    for t in tourists.tourists:
+                        if t.at_player_moon():
+                            income = player.leisure_income_rate()
+                            player.resources += income
+
+                if player.leisure_sigint():
+                    # Show rival next-tick intel (low frequency)
+                    if tick % 5 == 0:
+                        for r in rivals.rivals:
+                            if r.aggressive > 0.5 or r.sneaky > 0.5:
+                                tlog(f"  SIGINT: {r.name} — aggro={r.aggressive:.1f} "
+                                     f"sneak={r.sneaky:.1f} rep={r.reputation:+.2f}",
+                                     CYAN)
+
+                # 8. Scoring
                 if abs(equilibrium.value) < 0.3:
                     current_streak += 1
                     best_stability = max(best_stability, current_streak)
@@ -407,7 +713,7 @@ def main():
         orbital.draw(screen, game_state)
         ticker.draw(screen, market)
         eq_bar.draw(screen, equilibrium)
-        msg_panel.draw(screen, rivals, tourists, lattice)
+        msg_panel.draw(screen, rivals, tourists, lattice, comms)
         cmd_input.draw(screen)
         speed.draw(screen)
 
@@ -438,7 +744,18 @@ def main():
         ax += 80
         screen.blit(font.render(f"${player.resources:.0f}", True, res_col), (ax, sy))
 
-        sy += 16
+        # Upgrades row
+        sy += 14
+        u = player.upgrades
+        ux = score_r.x + 4
+        for label, key, icon in [("DRN", "drones", "■"), ("CLU", "clusters", "◆"), ("LEI", "leisure", "●")]:
+            level = u[key]
+            col = HIGHLIGHT if level >= 3 else (GREEN if level > 0 else DIM_GREEN)
+            pips = icon * level + "·" * (5 - level)
+            screen.blit(font.render(f"{label}:{pips}", True, col), (ux, sy))
+            ux += 100
+
+        sy += 14
         screen.blit(font.render(f"Tick:{tick}  Streak:{current_streak}(best:{best_stability})"
                                 f"  T:{total_trades} H:{total_heists} GA:{golden_ages_witnessed}",
                                 True, GREEN),
@@ -457,10 +774,9 @@ def main():
         hy += 16
         hints = [
             ("TRADE / HEIST / PROTECT", "Core actions (+ target)"),
-            ("RESEARCH / DIPLOMACY", "Positive eq, grow skills"),
-            ("SABOTAGE / EAVESDROP", "Naughty, grow stealth"),
-            ("SIMULATE <CMD>", "Preview w/ ability odds"),
-            ("STATUS", "Show abilities & connections"),
+            ("RESEARCH <TAG> / BUILD <TYPE>", "Invest in tech or infra"),
+            ("SABOTAGE / EAVESDROP", "Covert ops, grow stealth"),
+            ("RESPOND / BOUNTIES / STATUS", "Intel & comms"),
         ]
         for label, desc in hints:
             screen.blit(font_sm.render(f"{label}: {desc}", True, DIM_GREEN),

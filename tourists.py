@@ -7,10 +7,17 @@ TOURIST_DEFS = [
 ]
 
 
-def _random_route(origin, length=6):
-    """Generate a route of moon IDs (1-274) starting from origin."""
+def _random_route(origin, length=6, moon274_weight=1.0):
+    """Generate a route of moon IDs (1-274) starting from origin.
+    moon274_weight > 1 biases routes to include Moon 274 (from Leisure upgrades)."""
     route = [origin]
     for _ in range(length):
+        # Leisure attraction: chance to route through Moon 274
+        if moon274_weight > 1.0 and route[-1] != 274:
+            attract_chance = min(0.5, (moon274_weight - 1.0) * 0.15)
+            if random.random() < attract_chance:
+                route.append(274)
+                continue
         next_moon = random.randint(1, 274)
         while next_moon == route[-1]:
             next_moon = random.randint(1, 274)
@@ -66,11 +73,31 @@ class TouristEmissaries:
         """Move all tourists, generate interactions if at Moon 274."""
         self.events = []
         eq_val = game_state.get("equilibrium", 0.0)
+        leisure_mult = game_state.get("leisure_tourist_mult", 1.0)
+        extended_stay = game_state.get("leisure_extended_stay", False)
         interactions = []
 
         for t in self.tourists:
             old_pos = t.position
+
+            # Extended stay: if tourist is at Moon 274, chance to linger
+            if extended_stay and old_pos == 274 and random.random() < 0.35:
+                self.events.append(f"TOURIST: {t.name} extends stay at Moon 274")
+                options = t.interaction_options(eq_val)
+                for opt in options:
+                    if opt["type"] == "warning":
+                        self.events.append(f"  {t.name}: \"{opt['message']}\"")
+                    else:
+                        self.events.append(f"  {t.name} offers {opt['type']} ({opt.get('tag', '?')})")
+                interactions.extend(options)
+                continue  # skip movement
+
             t.move_tick()
+            # When generating new routes, use leisure weight
+            if t.route_idx == 0:  # just started a new route
+                t.route = _random_route(t.position, moon274_weight=leisure_mult)
+                t.position = t.route[0]
+
             if t.position == 274:
                 self.events.append(f"TOURIST: {t.name} arrives at Moon 274!")
                 options = t.interaction_options(eq_val)

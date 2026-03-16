@@ -84,6 +84,51 @@ class KnowledgeLattice:
         for t in self.golden_ages:
             self.golden_ages[t] -= 1
 
+    def research_directed(self, tag, strength=3.0):
+        """Directed research: push all nodes with this tag toward maturity.
+        Returns list of event strings."""
+        events = []
+        if tag not in TAGS:
+            events.append(f"Unknown research field: '{tag}'")
+            return events
+
+        pushed = 0
+        for name, node in self.nodes.items():
+            if tag in node["tags"]:
+                boost = strength * random.uniform(0.8, 1.5)
+                old = node["maturity"]
+                node["maturity"] = min(100, node["maturity"] + boost)
+                pushed += 1
+                if node["maturity"] >= GOLDEN_AGE_THRESHOLD and old < GOLDEN_AGE_THRESHOLD:
+                    events.append(f"BREAKTHROUGH: {name} hits {node['maturity']:.0f}%!")
+                elif boost > 2.5:
+                    events.append(f"RESEARCH: {name} +{boost:.1f}% ({node['maturity']:.0f}%)")
+
+        events.insert(0, f"Research pushed '{tag}' across {pushed} nodes.")
+        return events
+
+    def get_tag_status(self, tag):
+        """Get maturity info for a specific tag: avg maturity, closest to GA, etc."""
+        nodes_with_tag = [(name, node) for name, node in self.nodes.items()
+                          if tag in node["tags"]]
+        if not nodes_with_tag:
+            return None
+        avg = sum(n["maturity"] for _, n in nodes_with_tag) / len(nodes_with_tag)
+        closest = max(nodes_with_tag, key=lambda x: x[1]["maturity"])
+        flagged = [(name, n) for name, n in nodes_with_tag if n["flagged"]]
+        closest_flagged = max(flagged, key=lambda x: x[1]["maturity"]) if flagged else None
+        return {
+            "tag": tag,
+            "node_count": len(nodes_with_tag),
+            "avg_maturity": avg,
+            "closest_name": closest[0],
+            "closest_maturity": closest[1]["maturity"],
+            "closest_flagged_name": closest_flagged[0] if closest_flagged else None,
+            "closest_flagged_maturity": closest_flagged[1]["maturity"] if closest_flagged else None,
+            "golden_age_active": tag in self.golden_ages,
+            "golden_age_remaining": self.golden_ages.get(tag, 0),
+        }
+
     def inject_chaos(self, tags, strength=2.0):
         """Player action injects tag-weighted maturity boost."""
         for name, node in self.nodes.items():

@@ -70,6 +70,25 @@ class Rival:
             if self.reputation > 0.3 and self.aggressive > 0.5:
                 weights["heist"] += (self.aggressive - 0.5) * self.reputation * 1.2
 
+            # React to player upgrades
+            p_upgrades = player_state.get("player_upgrades", {})
+            drones = p_upgrades.get("drones", 0)
+            clusters = p_upgrades.get("clusters", 0)
+            leisure = p_upgrades.get("leisure", 0)
+
+            # High drones: aggressive rivals deterred, sneaky ones spy instead
+            if drones >= 2:
+                weights["heist"] *= max(0.4, 1.0 - drones * 0.12)
+                weights["spy"] += self.sneaky * drones * 0.15
+
+            # High clusters: rivals want to trade (profit from research output)
+            if clusters >= 2:
+                weights["trade"] += clusters * 0.3
+
+            # High leisure: sneaky rivals spy more (intel-rich environment)
+            if leisure >= 2:
+                weights["spy"] += self.sneaky * leisure * 0.2
+
         # Add Gaussian noise to each weight
         noisy = {k: max(0.01, v + random.gauss(0, 0.3)) for k, v in weights.items()}
         total = sum(noisy.values())

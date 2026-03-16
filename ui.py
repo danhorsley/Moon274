@@ -19,13 +19,14 @@ COMMANDS = {
     "TRADE":      ("Open trade channel with nearest rival",        "trade",      []),
     "HEIST":      ("Raid a rival moon for resources",              "heist",      []),
     "PROTECT":    ("Fortify Moon 274 defenses",                    "protect",    []),
-    "TRADE_IDEA": ("Exchange research with visiting Tourist",      "trade_idea", ["neural", "quantum"]),
+    "TRADE_IDEA": ("Exchange research with visiting Tourist",      "trade_idea", []),
     "EAVESDROP":  ("Tap rival comms for intel",                    "eavesdrop",  ["cyber"]),
     "SABOTAGE":   ("Sabotage rival infrastructure",                "sabotage",   ["cyber", "nano"]),
     "DIPLOMACY":  ("Send diplomatic envoy to rival",               "diplomacy",  []),
     "SMUGGLE":    ("Smuggle contraband for profit",                "smuggle",    ["carbon"]),
-    "RESEARCH":   ("Focus labs on breakthrough research",          "research",   ["quantum", "bio", "energy"]),
+    "RESEARCH":   ("Direct research at a tech field (eg RESEARCH QUANTUM)", "research", []),
     "BROADCAST":  ("Broadcast cultural signal across moons",       "broadcast",  ["optics"]),
+    "BUILD":      ("Build infrastructure (DRONES/CLUSTERS/LEISURE)",  "build",     []),
 }
 
 SIMULATE_RUNS = 50  # Monte Carlo preview count
@@ -48,19 +49,34 @@ def parse_command(raw):
         return None, f"Unknown action to simulate: {action}"
 
     if cmd in COMMANDS:
+        # For RESEARCH, the arg is a tech tag (lowercase), not a rival name
+        if cmd == "RESEARCH":
+            tag = parts[1].lower() if len(parts) > 1 else None
+            return (cmd, tag), ""
+        # For BUILD, the arg is an upgrade type (lowercase)
+        if cmd == "BUILD":
+            upgrade = parts[1].lower() if len(parts) > 1 else None
+            return (cmd, upgrade), ""
         target = parts[1] if len(parts) > 1 else None
         return (cmd, target), ""
 
-    # HELP / STATUS
+    # HELP / STATUS / RESPOND / BOUNTIES
     if cmd == "HELP":
         return ("HELP", None), ""
     if cmd == "STATUS":
-        return ("STATUS", None), ""
+        # STATUS <target> — pass remaining text as target
+        target = " ".join(parts[1:]) if len(parts) > 1 else None
+        return ("STATUS", target), ""
+    if cmd == "RESPOND":
+        arg = parts[1] if len(parts) > 1 else None
+        return ("RESPOND", arg), ""
+    if cmd == "BOUNTIES":
+        return ("BOUNTIES", None), ""
 
     return None, f"Unknown command: {cmd}"
 
 
-def run_simulate(action, lattice, market, equilibrium, rivals, player=None):
+def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=None):
     """Run N Monte Carlo previews of an action, return summary string."""
     from equilibrium import ACTION_IMPACTS
     from player import ACTION_ABILITIES, BASE_DIFFICULTY
@@ -120,6 +136,30 @@ def run_simulate(action, lattice, market, equilibrium, rivals, player=None):
     if action in ("HEIST", "SABOTAGE", "EAVESDROP"):
         avg_aggro = sum(r.aggressive for r in rivals.rivals) / len(rivals.rivals)
         lines.append(f"  Rival avg aggression: {avg_aggro:.2f} (retaliation risk)")
+
+    # Research tag info
+    if action == "RESEARCH" and tag:
+        status = lattice.get_tag_status(tag)
+        if status:
+            lines.append(f"  --- '{tag}' field status ---")
+            lines.append(f"  Nodes: {status['node_count']}  |  Avg maturity: {status['avg_maturity']:.0f}%")
+            lines.append(f"  Lead node: {status['closest_name']} ({status['closest_maturity']:.0f}%)")
+            if status["closest_flagged_name"]:
+                gap = 70 - status["closest_flagged_maturity"]
+                if gap > 0:
+                    lines.append(f"  Golden Age via: {status['closest_flagged_name']} "
+                                 f"({status['closest_flagged_maturity']:.0f}%) — {gap:.0f}% to go")
+                else:
+                    lines.append(f"  Golden Age: ALREADY TRIGGERED by {status['closest_flagged_name']}")
+            else:
+                lines.append(f"  No flagged nodes — Golden Age not possible via this tag alone")
+            if status["golden_age_active"]:
+                lines.append(f"  GOLDEN AGE ACTIVE: {status['golden_age_remaining']}t remaining")
+        else:
+            lines.append(f"  Unknown tag: '{tag}'")
+    elif action == "RESEARCH" and not tag:
+        lines.append(f"  Tip: RESEARCH <TAG> to target a field (e.g. RESEARCH QUANTUM)")
+        lines.append(f"  Tags: {', '.join(TAGS)}")
 
     return lines
 
@@ -245,16 +285,35 @@ class EquilibriumBar:
 
 
 class MessagePanel:
-    """Right panel: rival/tourist status + golden ages."""
+    """Right panel: comms/bounties + rival/tourist status + golden ages."""
     def __init__(self, rect, font):
         self.rect = pygame.Rect(rect)
         self.font = font
 
-    def draw(self, surface, rivals, tourists, lattice):
+    def draw(self, surface, rivals, tourists, lattice, comms=None):
         pygame.draw.rect(surface, DARK_GREEN, self.rect, 1)
         clip = surface.subsurface(self.rect)
         clip.fill(BG)
         y = 2
+
+        # Active proposals (urgent — show first)
+        if comms:
+            active_props = comms.get_active_proposals()
+            active_bounties = comms.get_active_bounties()
+            if active_props or active_bounties:
+                clip.blit(self.font.render("COMMS", True, HIGHLIGHT), (4, y))
+                y += 14
+                for p in active_props:
+                    timer_color = WARN_RED if p.timer <= 2 else HIGHLIGHT
+                    clip.blit(self.font.render(
+                        f" [{p.timer}t] {p.text[:32]}", True, timer_color), (4, y))
+                    y += 13
+                for b in active_bounties:
+                    timer_color = WARN_RED if b.timer <= 3 else HIGHLIGHT
+                    clip.blit(self.font.render(
+                        f" B[{b.timer}t] ${b.reward} {b.action_required[:6]}", True, timer_color), (4, y))
+                    y += 13
+                y += 2
 
         # Golden Ages
         clip.blit(self.font.render("GOLDEN AGES", True, HIGHLIGHT), (4, y))
@@ -267,16 +326,16 @@ class MessagePanel:
             clip.blit(self.font.render("  (none)", True, DIM_GREEN), (4, y))
             y += 13
 
-        # Rivals
-        y += 4
+        # Rivals (compact)
+        y += 2
         clip.blit(self.font.render("RIVALS", True, WARN_RED), (4, y))
         y += 14
         for name, action, rep in rivals.get_status():
             clip.blit(self.font.render(f"  {name[:14]:<14} {action:<7}", True, GREEN), (4, y))
             y += 13
 
-        # Tourists
-        y += 4
+        # Tourists (compact)
+        y += 2
         clip.blit(self.font.render("TOURISTS", True, COOL_BLUE), (4, y))
         y += 14
         for name, pos, pers in tourists.get_status():
