@@ -1,0 +1,343 @@
+import pygame
+import random
+from lattice import TAGS
+
+# Colors
+BG        = (0, 0, 0)
+GREEN     = (0, 200, 0)
+DIM_GREEN = (0, 120, 0)
+DARK_GREEN = (0, 60, 0)
+HIGHLIGHT = (255, 200, 0)
+WARN_RED  = (255, 80, 80)
+COOL_BLUE = (100, 160, 255)
+WHITE     = (200, 200, 200)
+CYAN      = (0, 220, 220)
+
+# ── Command definitions ─────────────────────────────────────────────
+# Each: (description, eq_action, lattice_tags_injected)
+COMMANDS = {
+    "TRADE":      ("Open trade channel with nearest rival",        "trade",      []),
+    "HEIST":      ("Raid a rival moon for resources",              "heist",      []),
+    "PROTECT":    ("Fortify Moon 274 defenses",                    "protect",    []),
+    "TRADE_IDEA": ("Exchange research with visiting Tourist",      "trade_idea", ["neural", "quantum"]),
+    "EAVESDROP":  ("Tap rival comms for intel",                    "eavesdrop",  ["cyber"]),
+    "SABOTAGE":   ("Sabotage rival infrastructure",                "sabotage",   ["cyber", "nano"]),
+    "DIPLOMACY":  ("Send diplomatic envoy to rival",               "diplomacy",  []),
+    "SMUGGLE":    ("Smuggle contraband for profit",                "smuggle",    ["carbon"]),
+    "RESEARCH":   ("Focus labs on breakthrough research",          "research",   ["quantum", "bio", "energy"]),
+    "BROADCAST":  ("Broadcast cultural signal across moons",       "broadcast",  ["optics"]),
+}
+
+SIMULATE_RUNS = 50  # Monte Carlo preview count
+
+
+def parse_command(raw):
+    """Parse a raw input string into (command, args) or (None, error_msg)."""
+    parts = raw.strip().upper().split()
+    if not parts:
+        return None, ""
+
+    cmd = parts[0]
+
+    # SIMULATE <ACTION> [MOON-N]
+    if cmd == "SIMULATE" and len(parts) >= 2:
+        action = parts[1]
+        target = parts[2] if len(parts) > 2 else None
+        if action in COMMANDS:
+            return ("SIMULATE", (action, target)), ""
+        return None, f"Unknown action to simulate: {action}"
+
+    if cmd in COMMANDS:
+        target = parts[1] if len(parts) > 1 else None
+        return (cmd, target), ""
+
+    # HELP
+    if cmd == "HELP":
+        return ("HELP", None), ""
+
+    return None, f"Unknown command: {cmd}"
+
+
+def run_simulate(action, lattice, market, equilibrium, rivals):
+    """Run N Monte Carlo previews of an action, return summary string."""
+    from equilibrium import ACTION_IMPACTS
+    delta = ACTION_IMPACTS.get(COMMANDS[action][1], 0.0)
+    tags = COMMANDS[action][2]
+
+    results = {"positive": 0, "negative": 0, "neutral": 0}
+    total_eq_shift = 0.0
+
+    for _ in range(SIMULATE_RUNS):
+        # Simulate equilibrium shift
+        sim_eq = equilibrium.value + delta + random.gauss(0, 0.03)
+        total_eq_shift += delta
+
+        # Estimate lattice ripple
+        ripple = 0
+        if tags:
+            tag_weights = lattice.get_tags()
+            for t in tags:
+                ripple += tag_weights.get(t, 0) * random.uniform(0, 0.01)
+
+        # Classify outcome
+        net = delta + ripple * 0.001
+        if net > 0.02:
+            results["positive"] += 1
+        elif net < -0.02:
+            results["negative"] += 1
+        else:
+            results["neutral"] += 1
+
+    lines = [
+        f"SIMULATE {action} ({SIMULATE_RUNS} runs):",
+        f"  Eq shift: {delta:+.2f} per action",
+        f"  Outcomes: {results['positive']}% favorable, "
+        f"{results['negative']}% unfavorable, {results['neutral']}% neutral",
+    ]
+
+    # Factor breakdown
+    if tags:
+        tag_weights = lattice.get_tags()
+        for t in tags:
+            w = tag_weights.get(t, 0)
+            lines.append(f"  Lattice '{t}': weight={w:.0f}" +
+                         (" (GOLDEN AGE active)" if t in lattice.golden_ages else ""))
+
+    # Rival factor
+    if action in ("HEIST", "SABOTAGE", "EAVESDROP"):
+        avg_aggro = sum(r.aggressive for r in rivals.rivals) / len(rivals.rivals)
+        lines.append(f"  Rival avg aggression: {avg_aggro:.2f} (retaliation risk)")
+
+    return lines
+
+
+# ── UI Panel Classes ────────────────────────────────────────────────
+
+class TerminalLog:
+    """Scrollable text log on the left side."""
+    def __init__(self, rect, font):
+        self.rect = pygame.Rect(rect)
+        self.font = font
+        self.lines = []       # (text, color)
+        self.scroll = 0       # lines scrolled up from bottom
+        self.line_h = 14
+
+    def add(self, text, color=GREEN):
+        self.lines.append((text, color))
+        if len(self.lines) > 500:
+            del self.lines[:200]
+        self.scroll = 0  # snap to bottom on new content
+
+    def scroll_up(self):
+        max_scroll = max(0, len(self.lines) - self.visible_count())
+        self.scroll = min(self.scroll + 3, max_scroll)
+
+    def scroll_down(self):
+        self.scroll = max(0, self.scroll - 3)
+
+    def visible_count(self):
+        return (self.rect.height - 20) // self.line_h
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, DARK_GREEN, self.rect, 1)
+        self.font_big = self.font  # reuse
+        clip = surface.subsurface(self.rect)
+        clip.fill(BG)
+
+        visible = self.visible_count()
+        end = len(self.lines) - self.scroll
+        start = max(0, end - visible)
+        y = 4
+        for text, color in self.lines[start:end]:
+            clip.blit(self.font.render(text, True, color), (4, y))
+            y += self.line_h
+
+        # Scroll indicator
+        if self.scroll > 0:
+            clip.blit(self.font.render(f"  [{self.scroll} more below]", True, DIM_GREEN),
+                      (4, self.rect.height - 14))
+
+
+class MarketTicker:
+    """Right panel: scrolling price ticker."""
+    def __init__(self, rect, font):
+        self.rect = pygame.Rect(rect)
+        self.font = font
+
+    def draw(self, surface, market):
+        pygame.draw.rect(surface, DARK_GREEN, self.rect, 1)
+        clip = surface.subsurface(self.rect)
+        clip.fill(BG)
+
+        clip.blit(self.font.render("MARKET TICKER", True, GREEN), (4, 2))
+        y = 18
+        for g in market.goods:
+            delta = ((g["price"] - g["base"]) / g["base"]) * 100
+            if delta > 10:
+                color = WARN_RED
+            elif delta < -10:
+                color = COOL_BLUE
+            else:
+                color = GREEN
+            line = f"{g['name']:<14} {g['price']:>7.0f} ({delta:+.0f}%)"
+            clip.blit(self.font.render(line, True, color), (4, y))
+            y += 14
+
+
+class EquilibriumBar:
+    """Visual equilibrium meter."""
+    def __init__(self, rect, font):
+        self.rect = pygame.Rect(rect)
+        self.font = font
+
+    def draw(self, surface, eq):
+        pygame.draw.rect(surface, DARK_GREEN, self.rect, 1)
+        clip = surface.subsurface(self.rect)
+        clip.fill(BG)
+
+        clip.blit(self.font.render(f"EQUILIBRIUM: {eq.value:+.3f}", True, GREEN), (4, 2))
+
+        # Bar
+        bar_x, bar_y = 4, 20
+        bar_w = self.rect.width - 8
+        bar_h = 16
+        pygame.draw.rect(clip, DIM_GREEN, (bar_x, bar_y, bar_w, bar_h), 1)
+
+        mid = bar_x + bar_w // 2
+        fill_w = int(eq.value * (bar_w // 2))
+
+        # Danger zone markers at ±0.7
+        mark_70 = int(0.7 * (bar_w // 2))
+        pygame.draw.line(clip, WARN_RED, (mid - mark_70, bar_y), (mid - mark_70, bar_y + bar_h))
+        pygame.draw.line(clip, WARN_RED, (mid + mark_70, bar_y), (mid + mark_70, bar_y + bar_h))
+
+        if fill_w > 0:
+            color = HIGHLIGHT if eq.value < 0.7 else WARN_RED
+            pygame.draw.rect(clip, color, (mid, bar_y + 1, fill_w, bar_h - 2))
+        elif fill_w < 0:
+            color = COOL_BLUE if eq.value > -0.7 else WARN_RED
+            pygame.draw.rect(clip, color, (mid + fill_w, bar_y + 1, -fill_w, bar_h - 2))
+
+        # Center tick
+        pygame.draw.line(clip, WHITE, (mid, bar_y), (mid, bar_y + bar_h))
+
+        # Status text
+        status = ""
+        if abs(eq.value) >= 0.7:
+            status = "!! DANGER ZONE !!"
+        elif abs(eq.value) >= 0.5:
+            status = "~ Unstable ~"
+        clip.blit(self.font.render(status, True, WARN_RED if status.startswith("!") else HIGHLIGHT),
+                  (4, bar_y + bar_h + 4))
+
+
+class MessagePanel:
+    """Right panel: rival/tourist status + golden ages."""
+    def __init__(self, rect, font):
+        self.rect = pygame.Rect(rect)
+        self.font = font
+
+    def draw(self, surface, rivals, tourists, lattice):
+        pygame.draw.rect(surface, DARK_GREEN, self.rect, 1)
+        clip = surface.subsurface(self.rect)
+        clip.fill(BG)
+        y = 2
+
+        # Golden Ages
+        clip.blit(self.font.render("GOLDEN AGES", True, HIGHLIGHT), (4, y))
+        y += 14
+        if lattice.golden_ages:
+            for tag, turns in lattice.golden_ages.items():
+                clip.blit(self.font.render(f"  {tag:<10} {turns}t left", True, HIGHLIGHT), (4, y))
+                y += 13
+        else:
+            clip.blit(self.font.render("  (none)", True, DIM_GREEN), (4, y))
+            y += 13
+
+        # Rivals
+        y += 4
+        clip.blit(self.font.render("RIVALS", True, WARN_RED), (4, y))
+        y += 14
+        for name, action, rep in rivals.get_status():
+            clip.blit(self.font.render(f"  {name[:14]:<14} {action:<7}", True, GREEN), (4, y))
+            y += 13
+
+        # Tourists
+        y += 4
+        clip.blit(self.font.render("TOURISTS", True, COOL_BLUE), (4, y))
+        y += 14
+        for name, pos, pers in tourists.get_status():
+            here = "*" if pos == 274 else " "
+            clip.blit(self.font.render(f" {here}{name[:13]:<13} M{pos:<3}", True,
+                                       CYAN if pos == 274 else GREEN), (4, y))
+            y += 13
+
+
+class CommandInput:
+    """Text input bar at the bottom."""
+    def __init__(self, rect, font):
+        self.rect = pygame.Rect(rect)
+        self.font = font
+        self.text = ""
+        self.cursor_visible = True
+        self.cursor_timer = 0
+
+    def handle_key(self, event):
+        """Process a KEYDOWN event. Returns completed command string or None."""
+        if event.key == pygame.K_RETURN:
+            cmd = self.text
+            self.text = ""
+            return cmd
+        elif event.key == pygame.K_BACKSPACE:
+            self.text = self.text[:-1]
+        elif event.key == pygame.K_TAB:
+            # Tab completion
+            partial = self.text.strip().upper()
+            matches = [c for c in list(COMMANDS) + ["SIMULATE", "HELP"] if c.startswith(partial)]
+            if len(matches) == 1:
+                self.text = matches[0] + " "
+        elif event.unicode and event.unicode.isprintable():
+            self.text += event.unicode
+        return None
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, DARK_GREEN, self.rect, 1)
+        clip = surface.subsurface(self.rect)
+        clip.fill((0, 10, 0))
+
+        self.cursor_timer += 1
+        cursor = "_" if (self.cursor_timer // 5) % 2 == 0 else " "
+        prompt = f"> {self.text}{cursor}"
+        clip.blit(self.font.render(prompt, True, GREEN), (4, 4))
+
+        # Hint
+        hint = "Type command (HELP for list) | TAB to complete | ENTER to run"
+        clip.blit(self.font.render(hint, True, DIM_GREEN), (4, 20))
+
+
+class GameOverScreen:
+    """Full-screen game over overlay."""
+    def __init__(self, font, font_big):
+        self.font = font
+        self.font_big = font_big
+
+    def draw(self, surface, msg):
+        overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 200))
+        surface.blit(overlay, (0, 0))
+
+        lines = [
+            "G A M E   O V E R",
+            "",
+            msg,
+            "",
+            "Press ESC to exit or R to restart",
+        ]
+        y = surface.get_height() // 2 - 60
+        for i, line in enumerate(lines):
+            f = self.font_big if i == 0 else self.font
+            color = WARN_RED if i == 0 else GREEN
+            rendered = f.render(line, True, color)
+            x = (surface.get_width() - rendered.get_width()) // 2
+            surface.blit(rendered, (x, y))
+            y += 24
