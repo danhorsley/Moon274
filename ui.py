@@ -51,49 +51,62 @@ def parse_command(raw):
         target = parts[1] if len(parts) > 1 else None
         return (cmd, target), ""
 
-    # HELP
+    # HELP / STATUS
     if cmd == "HELP":
         return ("HELP", None), ""
+    if cmd == "STATUS":
+        return ("STATUS", None), ""
 
     return None, f"Unknown command: {cmd}"
 
 
-def run_simulate(action, lattice, market, equilibrium, rivals):
+def run_simulate(action, lattice, market, equilibrium, rivals, player=None):
     """Run N Monte Carlo previews of an action, return summary string."""
     from equilibrium import ACTION_IMPACTS
+    from player import ACTION_ABILITIES, BASE_DIFFICULTY
     delta = ACTION_IMPACTS.get(COMMANDS[action][1], 0.0)
     tags = COMMANDS[action][2]
+    eq_action = COMMANDS[action][1]
 
-    results = {"positive": 0, "negative": 0, "neutral": 0}
+    # Calculate success rate via Monte Carlo
+    successes = 0
+    crit_fails = 0
     total_eq_shift = 0.0
 
+    primary, secondary = ACTION_ABILITIES.get(eq_action, ("influence", "extraction"))
+    base_diff = BASE_DIFFICULTY.get(eq_action, 0.30)
+
     for _ in range(SIMULATE_RUNS):
-        # Simulate equilibrium shift
-        sim_eq = equilibrium.value + delta + random.gauss(0, 0.03)
+        if player:
+            ability_bonus = player.abilities[primary] * 0.12 + player.abilities[secondary] * 0.06
+            eff_diff = max(0.05, base_diff - ability_bonus + player.notoriety * 0.15
+                          if eq_action in ("heist", "eavesdrop", "sabotage", "smuggle")
+                          else base_diff - ability_bonus)
+        else:
+            eff_diff = base_diff
+
+        roll = random.random()
+        if roll > eff_diff:
+            successes += 1
+        elif roll < eff_diff * 0.10:
+            crit_fails += 1
         total_eq_shift += delta
 
-        # Estimate lattice ripple
-        ripple = 0
-        if tags:
-            tag_weights = lattice.get_tags()
-            for t in tags:
-                ripple += tag_weights.get(t, 0) * random.uniform(0, 0.01)
-
-        # Classify outcome
-        net = delta + ripple * 0.001
-        if net > 0.02:
-            results["positive"] += 1
-        elif net < -0.02:
-            results["negative"] += 1
-        else:
-            results["neutral"] += 1
+    success_pct = (successes / SIMULATE_RUNS) * 100
+    crit_pct = (crit_fails / SIMULATE_RUNS) * 100
 
     lines = [
         f"SIMULATE {action} ({SIMULATE_RUNS} runs):",
+        f"  Success rate: {success_pct:.0f}%  |  Crit fail: {crit_pct:.0f}%",
         f"  Eq shift: {delta:+.2f} per action",
-        f"  Outcomes: {results['positive']}% favorable, "
-        f"{results['negative']}% unfavorable, {results['neutral']}% neutral",
     ]
+
+    # Ability factors
+    if player:
+        lines.append(f"  Using: {primary}={player.abilities[primary]:.2f} "
+                     f"+ {secondary}={player.abilities[secondary]:.2f}")
+        if eq_action in ("heist", "eavesdrop", "sabotage", "smuggle"):
+            lines.append(f"  Notoriety penalty: +{player.notoriety * 0.15:.2f} difficulty")
 
     # Factor breakdown
     if tags:
@@ -313,6 +326,130 @@ class CommandInput:
         # Hint
         hint = "Type command (HELP for list) | TAB to complete | ENTER to run"
         clip.blit(self.font.render(hint, True, DIM_GREEN), (4, 20))
+
+
+class SpeedControl:
+    """Cassette-style playback controls: pause, step, 1x, 3x, 10x."""
+
+    SPEEDS = [
+        ("||",  "PAUSED", 0),       # paused
+        ("|>",  "STEP",   0),       # advance one tick then pause
+        (">",   "1x",     600),     # normal
+        (">>",  "3x",     200),     # fast
+        (">>>", "10x",    60),      # very fast
+    ]
+
+    def __init__(self, rect, font):
+        self.rect = pygame.Rect(rect)
+        self.font = font
+        self.mode = 0  # start paused
+        self.step_pending = False
+        self.btn_rects = []  # computed in draw
+        self._build_btn_rects()
+
+    def _build_btn_rects(self):
+        bw = 44
+        gap = 4
+        x = self.rect.x + 4
+        y = self.rect.y + 18
+        self.btn_rects = []
+        for i in range(len(self.SPEEDS)):
+            self.btn_rects.append(pygame.Rect(x, y, bw, 18))
+            x += bw + gap
+
+    @property
+    def tick_interval(self):
+        return self.SPEEDS[self.mode][2]
+
+    @property
+    def is_paused(self):
+        return self.mode == 0
+
+    @property
+    def label(self):
+        return self.SPEEDS[self.mode][1]
+
+    def set_mode(self, mode):
+        self.mode = max(0, min(len(self.SPEEDS) - 1, mode))
+        self.step_pending = False
+
+    def request_step(self):
+        """Advance exactly one tick, then return to paused."""
+        self.mode = 1
+        self.step_pending = True
+
+    def after_step(self):
+        """Called after a step-tick completes."""
+        if self.step_pending:
+            self.mode = 0
+            self.step_pending = False
+
+    def should_tick(self, elapsed_ms):
+        """Return True if enough time has passed for a tick at current speed."""
+        if self.mode == 0:
+            return False
+        if self.mode == 1:  # step mode: tick once
+            return True
+        return elapsed_ms >= self.tick_interval
+
+    def handle_key(self, key):
+        """Handle speed-related keys. Returns True if consumed."""
+        if key == pygame.K_SPACE:
+            if self.is_paused:
+                self.set_mode(2)  # unpause to 1x
+            else:
+                self.set_mode(0)  # pause
+            return True
+        if key == pygame.K_PERIOD:  # '.' = step one tick
+            self.request_step()
+            return True
+        if key == pygame.K_1:
+            self.set_mode(2)
+            return True
+        if key == pygame.K_2:
+            self.set_mode(3)
+            return True
+        if key == pygame.K_3:
+            self.set_mode(4)
+            return True
+        return False
+
+    def handle_click(self, pos):
+        """Handle mouse click on speed buttons. Returns True if consumed."""
+        for i, r in enumerate(self.btn_rects):
+            if r.collidepoint(pos):
+                if i == 1:  # step button
+                    self.request_step()
+                else:
+                    self.set_mode(i)
+                return True
+        return False
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, DARK_GREEN, self.rect, 1)
+
+        # Title
+        surface.blit(self.font.render("SPEED", True, GREEN),
+                     (self.rect.x + 4, self.rect.y + 2))
+
+        # Buttons
+        for i, (sym, label, _) in enumerate(self.SPEEDS):
+            r = self.btn_rects[i]
+            active = (i == self.mode)
+            bg = (0, 80, 0) if active else (0, 20, 0)
+            border = HIGHLIGHT if active else DIM_GREEN
+            pygame.draw.rect(surface, bg, r)
+            pygame.draw.rect(surface, border, r, 1)
+            color = HIGHLIGHT if active else GREEN
+            surface.blit(self.font.render(sym, True, color),
+                         (r.x + 4, r.y + 2))
+
+        # Status label + keybinds
+        status_x = self.rect.x + 4
+        status_y = self.rect.y + 40
+        surface.blit(self.font.render(
+            f"[SPACE] pause/play  [.] step  [1] 1x  [2] 3x  [3] 10x",
+            True, DIM_GREEN), (status_x, status_y))
 
 
 class GameOverScreen:

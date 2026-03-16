@@ -87,3 +87,9 @@ class TouristEmissaries:
 
     def get_status(self):
         return [(t.name, t.position, t.personality) for t in self.tourists]
+
+    def get_positions(self):
+        return [(t.name, t.position) for t in self.tourists]
+
+    def get_routes(self):
+        return [t.route for t in self.tourists]

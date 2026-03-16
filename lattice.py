@@ -62,7 +62,7 @@ class KnowledgeLattice:
             ga_mult = 1.0
             for t in node["tags"]:
                 if t in self.golden_ages:
-                    ga_mult = max(ga_mult, 3.0)
+                    ga_mult = max(ga_mult, 2.0)  # 2x during Golden Age (was 3x)
             roll = random.gauss(0.5, 0.3) * tag_bonus * ga_mult
             node["maturity"] = min(100, node["maturity"] + max(0, roll))
 
