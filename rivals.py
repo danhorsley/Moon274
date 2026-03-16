@@ -1,12 +1,20 @@
 import random
 
+# Archetypes: "hub" (trade), "military" (aggro/defense), "compute" (research/intel)
 RIVAL_DEFS = [
-    {"name": "Krath Syndicate",   "aggressive": 0.8, "sneaky": 0.3, "diplomatic": 0.2, "moon": 50},
-    {"name": "Velune Collective",  "aggressive": 0.2, "sneaky": 0.7, "diplomatic": 0.5, "moon": 100},
-    {"name": "Iron Meridian",      "aggressive": 0.6, "sneaky": 0.1, "diplomatic": 0.4, "moon": 150},
-    {"name": "Obsidian Court",     "aggressive": 0.4, "sneaky": 0.9, "diplomatic": 0.3, "moon": 200},
-    {"name": "Helios Compact",     "aggressive": 0.3, "sneaky": 0.2, "diplomatic": 0.8, "moon": 250},
+    {"name": "Krath Syndicate",   "aggressive": 0.8, "sneaky": 0.3, "diplomatic": 0.2, "moon": 50,  "archetype": "military"},
+    {"name": "Velune Collective",  "aggressive": 0.2, "sneaky": 0.7, "diplomatic": 0.5, "moon": 100, "archetype": "compute"},
+    {"name": "Iron Meridian",      "aggressive": 0.6, "sneaky": 0.1, "diplomatic": 0.4, "moon": 150, "archetype": "hub"},
+    {"name": "Obsidian Court",     "aggressive": 0.4, "sneaky": 0.9, "diplomatic": 0.3, "moon": 200, "archetype": "compute"},
+    {"name": "Helios Compact",     "aggressive": 0.3, "sneaky": 0.2, "diplomatic": 0.8, "moon": 250, "archetype": "hub"},
 ]
+
+ARCHETYPE_LABELS = {"hub": "[H]", "military": "[M]", "compute": "[C]"}
+ARCHETYPE_DESC = {
+    "hub":      "Trade hub — better trade income, attracts tourists",
+    "military": "Military power — retaliates hard, can deter raids",
+    "compute":  "Compute node — research synergy, rich intel",
+}
 
 ACTIONS = ["heist", "trade", "spy", "fortify", "idle"]
 
@@ -18,6 +26,7 @@ class Rival:
         self.sneaky = defn["sneaky"]
         self.diplomatic = defn["diplomatic"]
         self.moon = defn["moon"]
+        self.archetype = defn["archetype"]  # "hub", "military", "compute"
         self.reputation = 0.0   # -1 hostile .. +1 friendly
         self.last_action = "idle"
 
@@ -89,6 +98,17 @@ class Rival:
             if leisure >= 2:
                 weights["spy"] += self.sneaky * leisure * 0.2
 
+        # Archetype bias
+        if self.archetype == "hub":
+            weights["trade"] += 1.0
+            weights["heist"] *= 0.7
+        elif self.archetype == "military":
+            weights["fortify"] += 1.0
+            weights["heist"] += 0.5
+        elif self.archetype == "compute":
+            weights["spy"] += 1.0
+            weights["idle"] *= 0.5
+
         # Add Gaussian noise to each weight
         noisy = {k: max(0.01, v + random.gauss(0, 0.3)) for k, v in weights.items()}
         total = sum(noisy.values())
@@ -143,4 +163,40 @@ class RivalMoons:
         return [(r.name, r.last_action, r.reputation) for r in self.rivals]
 
     def get_positions(self):
-        return [(r.name, r.moon) for r in self.rivals]
+        return [(r.name, r.moon, r.archetype) for r in self.rivals]
+
+    def get_rival_by_name(self, name):
+        """Look up a rival by exact name."""
+        for r in self.rivals:
+            if r.name == name:
+                return r
+        return None
+
+    def get_hub_trade_bonus(self, rival_name):
+        """Multiplier for passive trade income with hub rivals. 1.5x for hubs, 1.0 otherwise."""
+        r = self.get_rival_by_name(rival_name)
+        if r and r.archetype == "hub":
+            return 1.5
+        return 1.0
+
+    def get_compute_research_trickle(self, rival_name):
+        """Research trickle rate when trade line open with compute rival."""
+        r = self.get_rival_by_name(rival_name)
+        if r and r.archetype == "compute":
+            return 0.3  # small lattice push strength
+        return 0.0
+
+    def get_military_deterrent(self, rival_name):
+        """Raid deterrence factor from military alliance (0.0 to 0.3)."""
+        r = self.get_rival_by_name(rival_name)
+        if r and r.archetype == "military" and r.reputation > 0.2:
+            return min(0.3, r.reputation * 0.3)
+        return 0.0
+
+    def get_total_military_deterrent(self, player_connections):
+        """Total raid deterrence from all military alliances."""
+        total = 0.0
+        for name, conn in player_connections.items():
+            if conn.open_trade or conn.trust > 0.2:
+                total += self.get_military_deterrent(name)
+        return min(0.5, total)  # cap at 50% reduction

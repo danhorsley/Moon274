@@ -13,9 +13,9 @@ from flavor import get_flavor, get_game_over_flavor, SoundBank
 from ui import (
     TerminalLog, MarketTicker, EquilibriumBar, MessagePanel,
     CommandInput, GameOverScreen, SpeedControl, COMMANDS,
-    parse_command, run_simulate,
+    parse_command, run_simulate, run_simulate_all,
     BG, GREEN, DIM_GREEN, HIGHLIGHT, WARN_RED, COOL_BLUE, CYAN, WHITE,
-    DARK_GREEN,
+    DARK_GREEN, FAMILY_COLORS,
 )
 
 WIDTH, HEIGHT = 1280, 800
@@ -139,7 +139,7 @@ def main():
                 sign = "+" if eq_act in ("trade", "protect", "trade_idea",
                                          "diplomacy", "research", "broadcast") else "-"
                 tlog(f"  {name:<12} {desc}  [eq:{sign}]", GREEN)
-            tlog(f"  {'SIMULATE':<12} Preview: SIMULATE <CMD>", GREEN)
+            tlog(f"  {'SIMULATE':<12} Preview: SIMULATE <CMD> or SIMULATE ALL", GREEN)
             tlog(f"  {'RESPOND':<12} RESPOND ACCEPT/DENY — reply to comms", GREEN)
             tlog(f"  {'BOUNTIES':<12} Show active bounties", GREEN)
             tlog(f"  {'STATUS':<12} Show abilities & connections", GREEN)
@@ -161,8 +161,11 @@ def main():
                     tlog(f"  Known: {', '.join(r.name for r in rivals.rivals)}", DIM_GREEN)
                     return
 
-                tlog(f"--- {target_rival.name.upper()} ---", HIGHLIGHT)
-                tlog(f"  Moon: {target_rival.moon}", GREEN)
+                from rivals import ARCHETYPE_LABELS, ARCHETYPE_DESC
+                arch_tag = ARCHETYPE_LABELS.get(target_rival.archetype, "")
+                arch_desc = ARCHETYPE_DESC.get(target_rival.archetype, "")
+                tlog(f"--- {target_rival.name.upper()} {arch_tag} ---", HIGHLIGHT)
+                tlog(f"  Moon: {target_rival.moon}  |  {arch_desc}", GREEN)
                 tlog(f"  Personality: aggro={target_rival.aggressive:.1f}"
                      f"  sneaky={target_rival.sneaky:.1f}"
                      f"  diplo={target_rival.diplomatic:.1f}", GREEN)
@@ -210,7 +213,11 @@ def main():
                     maint = tourists.get_resident_maintenance()
                     tlog(f"  Total maintenance: {maint:.1f}/tick", DIM_GREEN)
                 if player.research_focus_tag:
-                    tlog(f"  Research focus: {player.research_focus_tag.upper()}", CYAN)
+                    from lattice import TAG_FAMILIES
+                    fam = TAG_FAMILIES.get(player.research_focus_tag, "science")
+                    fam_color = FAMILY_COLORS.get(fam, CYAN)
+                    fam_label = {"commerce": "Commerce", "warfare": "Warfare", "science": "Science"}.get(fam, "")
+                    tlog(f"  Research focus: {player.research_focus_tag.upper()} ({fam_label})", fam_color)
                 tlog("  Type STATUS <name> for rival details", DIM_GREEN)
                 tlog("---------------------", HIGHLIGHT)
             return
@@ -263,6 +270,12 @@ def main():
             tlog("-----------------------", HIGHLIGHT)
             return
 
+        if cmd == "SIMULATE_ALL":
+            lines = run_simulate_all(lattice, market, equilibrium, rivals, player, tourists=tourists)
+            for line in lines:
+                tlog(line, CYAN)
+            return
+
         if cmd == "SIMULATE":
             action, target = args
             # Pass tag for RESEARCH simulations
@@ -306,19 +319,31 @@ def main():
 
         # ── RESEARCH: directed at a tech tag, not a rival ──
         if eq_action == "research":
-            from lattice import TAGS as ALL_TAGS
+            from lattice import TAGS as ALL_TAGS, TAG_FAMILIES, get_tags_by_family
             tag = args.lower() if args else None
+
+            def _show_research_fields():
+                """Display available research fields grouped by family."""
+                families = get_tags_by_family()
+                tlog("  Available fields:", DIM_GREEN)
+                for fam, label in [("commerce", "Commerce [H]"), ("warfare", "Warfare [M]"), ("science", "Science [C]")]:
+                    color = FAMILY_COLORS.get(fam, DIM_GREEN)
+                    tags_str = ", ".join(t.upper() for t in families[fam])
+                    tlog(f"    {label}: {tags_str}", color)
 
             # No tag = unfocused (random)
             if not tag:
                 tag = random.choice(ALL_TAGS)
                 tlog(f">>> RESEARCH (unfocused — defaulting to '{tag}')", CYAN)
+                _show_research_fields()
             elif tag not in ALL_TAGS:
                 tlog(f"ERROR: Unknown research field: '{tag}'", WARN_RED)
-                tlog(f"  Available: {', '.join(ALL_TAGS)}", DIM_GREEN)
+                _show_research_fields()
                 return
             else:
-                tlog(f">>> RESEARCH {tag.upper()}", COOL_BLUE)
+                fam = TAG_FAMILIES.get(tag, "science")
+                fam_color = FAMILY_COLORS.get(fam, COOL_BLUE)
+                tlog(f">>> RESEARCH {tag.upper()}", fam_color)
 
             # Resolve through player ability system (no target rival)
             success, p_events, eq_modifier = player.resolve_action(
@@ -520,9 +545,10 @@ def main():
                     if map_result[0] == "click":
                         moon_id = map_result[1]
                         tlog(f"MAP: Selected Moon {moon_id}", CYAN)
-                        for r_name, r_pos in game_state["rival_positions"]:
+                        for r_name, r_pos, r_arch in game_state["rival_positions"]:
                             if r_pos == moon_id:
-                                tlog(f"  Rival: {r_name}", WARN_RED)
+                                tag = {"hub": "[H]", "military": "[M]", "compute": "[C]"}.get(r_arch, "")
+                                tlog(f"  Rival: {r_name} {tag}", WARN_RED)
                         for t_name, t_pos in game_state["tourist_positions"]:
                             if t_pos == moon_id:
                                 tlog(f"  Tourist: {t_name}", COOL_BLUE)
@@ -575,11 +601,13 @@ def main():
                         equilibrium.action_impact("heist")
                         # Chance rival targets player instead of another rival
                         conn = player.connections.get(r.name)
+                        # Military alliances deter raids from other rivals
+                        mil_deter = rivals.get_total_military_deterrent(player.connections)
                         targets_player = False
                         if conn and conn.grudge_ticks > 0:
-                            targets_player = random.random() < 0.4 + r.aggressive * 0.3
+                            targets_player = random.random() < max(0.05, (0.4 + r.aggressive * 0.3) - mil_deter)
                         elif r.reputation < -0.2:
-                            targets_player = random.random() < 0.15
+                            targets_player = random.random() < max(0.02, 0.15 - mil_deter)
                         if targets_player:
                             # Drone intercept check
                             if random.random() < player.drone_intercept_chance():
@@ -748,6 +776,26 @@ def main():
                                 tlog(f"  SIGINT: {r.name} — aggro={r.aggressive:.1f} "
                                      f"sneak={r.sneaky:.1f} rep={r.reputation:+.2f}",
                                      CYAN)
+
+                # 7d. Archetype passives: hub income, compute trickle, military deterrent
+                for r in rivals.rivals:
+                    conn = player.connections.get(r.name)
+                    if not conn or not conn.open_trade:
+                        continue
+                    # Hub: passive trade income scaled by trust
+                    if r.archetype == "hub":
+                        hub_income = max(0, conn.trust) * 1.5
+                        if hub_income > 0:
+                            player.resources += hub_income
+                    # Compute: research trickle on focus tag
+                    if r.archetype == "compute" and player.research_focus_tag:
+                        c_trickle = rivals.get_compute_research_trickle(r.name)
+                        if c_trickle > 0:
+                            lattice.research_directed(player.research_focus_tag, strength=c_trickle)
+                            for e in lattice.events:
+                                if "BREAKTHROUGH" in e:
+                                    tlog(f"  COMPUTE LINK ({r.name}): {e}", HIGHLIGHT)
+                                    elog(e, HIGHLIGHT)
 
                 # 8. Scoring
                 if abs(equilibrium.value) < 0.3:

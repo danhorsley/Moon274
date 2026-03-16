@@ -10,6 +10,11 @@ MOON_DOT   = (0, 100, 0)
 MOON_HOVER = (0, 220, 0)
 PLAYER_MOON = (0, 255, 100)
 RIVAL_BLIP = (255, 80, 80)
+RIVAL_COLORS = {
+    "hub":      (0, 220, 220),    # cyan
+    "military": (255, 80, 80),    # red (same as default)
+    "compute":  (220, 220, 0),    # yellow
+}
 TOURIST_BLIP = (100, 160, 255)
 ROUTE_LINE = (0, 220, 220, 120)
 ROUTE_DRAG = (255, 200, 0)
@@ -146,9 +151,10 @@ class OrbitalMap:
             lines.append(">> YOUR MOON <<")
 
         # Check if any rivals are here
-        for r_name, r_pos in game_state.get("rival_positions", []):
+        for r_name, r_pos, r_arch in game_state.get("rival_positions", []):
             if r_pos == mid:
-                lines.append(f"Rival: {r_name}")
+                tag = {"hub": "[H]", "military": "[M]", "compute": "[C]"}.get(r_arch, "")
+                lines.append(f"Rival: {r_name} {tag}")
 
         # Check tourists
         for t_name, t_pos in game_state.get("tourist_positions", []):
@@ -187,10 +193,15 @@ class OrbitalMap:
             else:
                 pygame.draw.circle(surface, MOON_DOT, (m.x, m.y), 3)
 
-        # Rival blips
-        for r_name, r_pos in game_state.get("rival_positions", []):
+        # Rival blips (color-coded by archetype)
+        for r_name, r_pos, r_arch in game_state.get("rival_positions", []):
             rx, ry = self.get_moon_pos(r_pos)
-            pygame.draw.circle(surface, RIVAL_BLIP, (rx, ry), 5, 2)
+            color = RIVAL_COLORS.get(r_arch, RIVAL_BLIP)
+            pygame.draw.circle(surface, color, (rx, ry), 5, 2)
+            # Archetype letter label
+            label = {"hub": "H", "military": "M", "compute": "C"}.get(r_arch, "?")
+            lbl_surf = self.font.render(label, True, color)
+            surface.blit(lbl_surf, (rx + 6, ry - 5))
 
         # Tourist blips
         for t_name, t_pos in game_state.get("tourist_positions", []):

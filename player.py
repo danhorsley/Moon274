@@ -510,13 +510,15 @@ class PlayerState:
 
     def get_connection_summary(self, rivals):
         """Short list of connections for UI."""
+        from rivals import ARCHETYPE_LABELS
         lines = []
         for r in rivals.rivals:
+            tag = ARCHETYPE_LABELS.get(r.archetype, "")
             conn = self.connections.get(r.name)
             if conn:
                 trade = "OPEN" if conn.open_trade else "closed"
                 grudge = f" GRUDGE:{conn.grudge_ticks}t" if conn.grudge_ticks > 0 else ""
-                lines.append(f"  {r.name[:14]:<14} trd:{trade:<6} trust:{conn.trust:+.2f}{grudge}")
+                lines.append(f"  {r.name[:14]:<14} {tag} trd:{trade:<6} trust:{conn.trust:+.2f}{grudge}")
             else:
-                lines.append(f"  {r.name[:14]:<14} (no contact)")
+                lines.append(f"  {r.name[:14]:<14} {tag} (no contact)")
         return lines

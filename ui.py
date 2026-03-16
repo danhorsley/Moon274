@@ -13,6 +13,13 @@ COOL_BLUE = (100, 160, 255)
 WHITE     = (200, 200, 200)
 CYAN      = (0, 220, 220)
 
+# Tag family colors (match archetype colors on map)
+FAMILY_COLORS = {
+    "commerce": (0, 220, 220),    # cyan — matches hub
+    "warfare":  (255, 80, 80),    # red — matches military
+    "science":  (220, 220, 0),    # yellow — matches compute
+}
+
 # ── Command definitions ─────────────────────────────────────────────
 # Each: (description, eq_action, lattice_tags_injected)
 COMMANDS = {
@@ -40,9 +47,11 @@ def parse_command(raw):
 
     cmd = parts[0]
 
-    # SIMULATE <ACTION> [MOON-N]
+    # SIMULATE <ACTION> [MOON-N] or SIMULATE ALL
     if cmd == "SIMULATE" and len(parts) >= 2:
         action = parts[1]
+        if action == "ALL":
+            return ("SIMULATE_ALL", None), ""
         target = parts[2] if len(parts) > 2 else None
         if action in COMMANDS:
             return ("SIMULATE", (action, target)), ""
@@ -74,6 +83,74 @@ def parse_command(raw):
         return ("BOUNTIES", None), ""
 
     return None, f"Unknown command: {cmd}"
+
+
+def run_simulate_all(lattice, market, equilibrium, rivals, player=None, tourists=None):
+    """Compact Monte Carlo summary of ALL actions. Returns list of lines."""
+    from equilibrium import ACTION_IMPACTS
+    from player import ACTION_ABILITIES, BASE_DIFFICULTY
+    from lattice import TAG_FAMILIES
+
+    lines = [f"SIMULATE ALL ({SIMULATE_RUNS} runs each):"]
+    lines.append(f"  {'ACTION':<13} {'SUCCESS':>7}  {'CRIT':>5}  {'EQ':>6}  NOTES")
+    lines.append(f"  {'─' * 55}")
+
+    # Synergy bonus (same for all actions, computed once per source)
+    synergy_cache = {}
+    if tourists:
+        for cmd_name in COMMANDS:
+            eq_act = COMMANDS[cmd_name][1]
+            synergy_cache[eq_act] = tourists.get_synergy_bonus(eq_act)
+
+    results = []
+    for cmd_name, (desc, eq_action, chaos_tags) in COMMANDS.items():
+        if eq_action == "build":
+            continue  # BUILD isn't simulatable
+
+        delta = ACTION_IMPACTS.get(eq_action, 0.0)
+        primary, secondary = ACTION_ABILITIES.get(eq_action, ("influence", "extraction"))
+        base_diff = BASE_DIFFICULTY.get(eq_action, 0.30)
+        syn = synergy_cache.get(eq_action, 0.0)
+
+        successes = 0
+        crit_fails = 0
+        for _ in range(SIMULATE_RUNS):
+            if player:
+                ability_bonus = player.abilities[primary] * 0.12 + player.abilities[secondary] * 0.06
+                eff_diff = max(0.05, base_diff - ability_bonus - syn
+                              + (player.notoriety * 0.15
+                                 if eq_action in ("heist", "eavesdrop", "sabotage", "smuggle")
+                                 else 0))
+            else:
+                eff_diff = base_diff
+            roll = random.random()
+            if roll > eff_diff:
+                successes += 1
+            elif roll < eff_diff * 0.10:
+                crit_fails += 1
+
+        success_pct = (successes / SIMULATE_RUNS) * 100
+        crit_pct = (crit_fails / SIMULATE_RUNS) * 100
+
+        notes = []
+        if syn > 0:
+            notes.append(f"syn-{syn:.0%}")
+        if eq_action in ("heist", "eavesdrop", "sabotage", "smuggle") and player and player.notoriety > 0.1:
+            notes.append(f"noto")
+        notes_str = " ".join(notes)
+
+        results.append((cmd_name, success_pct, crit_pct, delta, notes_str))
+
+    # Sort by success rate descending
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    for cmd_name, spct, cpct, delta, notes_str in results:
+        bar = "█" * int(spct / 10) + "·" * (10 - int(spct / 10))
+        lines.append(f"  {cmd_name:<13} {spct:5.0f}%  {cpct:4.0f}%  {delta:+5.2f}  {bar} {notes_str}")
+
+    lines.append(f"  {'─' * 55}")
+    lines.append(f"  Sorted by success rate. SIMULATE <ACTION> for details.")
+    return lines
 
 
 def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=None,
@@ -155,9 +232,13 @@ def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=
 
     # Research tag info
     if action == "RESEARCH" and tag:
+        from lattice import TAG_FAMILIES, FAMILY_NAMES
+        fam = TAG_FAMILIES.get(tag, "science")
+        fam_label = FAMILY_NAMES.get(fam, "Science")
+        archetype_map = {"commerce": "Hub", "warfare": "Military", "science": "Compute"}
         status = lattice.get_tag_status(tag)
         if status:
-            lines.append(f"  --- '{tag}' field status ---")
+            lines.append(f"  --- '{tag}' ({fam_label} / {archetype_map[fam]} synergy) ---")
             lines.append(f"  Nodes: {status['node_count']}  |  Avg maturity: {status['avg_maturity']:.0f}%")
             lines.append(f"  Lead node: {status['closest_name']} ({status['closest_maturity']:.0f}%)")
             if status["closest_flagged_name"]:
@@ -174,8 +255,12 @@ def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=
         else:
             lines.append(f"  Unknown tag: '{tag}'")
     elif action == "RESEARCH" and not tag:
+        from lattice import get_tags_by_family
         lines.append(f"  Tip: RESEARCH <TAG> to target a field (e.g. RESEARCH QUANTUM)")
-        lines.append(f"  Tags: {', '.join(TAGS)}")
+        families = get_tags_by_family()
+        for fam, label in [("commerce", "Commerce [H]"), ("warfare", "Warfare [M]"), ("science", "Science [C]")]:
+            tags_str = ", ".join(t.upper() for t in families[fam])
+            lines.append(f"    {label}: {tags_str}")
 
     return lines
 

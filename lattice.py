@@ -2,6 +2,41 @@ import random
 
 TAGS = ["quantum", "neural", "carbon", "energy", "nano", "bio", "cyber", "plasma", "gravity", "optics"]
 
+# Tech families — map to rival archetypes for intuitive play
+# Commerce (hub): trade goods, comms, power infrastructure
+# Warfare (military): weapons, infiltration, hacking
+# Science (compute): pure research, life sciences, mega-engineering
+TAG_FAMILIES = {
+    "carbon": "commerce", "optics": "commerce", "energy": "commerce",
+    "plasma": "warfare", "nano": "warfare", "cyber": "warfare",
+    "quantum": "science", "bio": "science", "gravity": "science", "neural": "science",
+}
+
+FAMILY_NAMES = {
+    "commerce": "Commerce",
+    "warfare":  "Warfare",
+    "science":  "Science",
+}
+
+# Golden Age effect hints per family (shown when GA triggers)
+FAMILY_GA_HINTS = {
+    "commerce": "trade income surges, tourists flock to research hubs",
+    "warfare":  "weapons systems surge, raids hit harder and defenses strengthen",
+    "science":  "breakthroughs accelerate, compute nodes share deeper intel",
+}
+
+def get_tag_family(tag):
+    """Return family name for a tag."""
+    return TAG_FAMILIES.get(tag, "science")
+
+def get_tags_by_family():
+    """Return dict of family -> [tags] for display."""
+    families = {"commerce": [], "warfare": [], "science": []}
+    for tag in TAGS:
+        fam = TAG_FAMILIES.get(tag, "science")
+        families[fam].append(tag)
+    return families
+
 SEED_NODES = [
     ("Quantum Computing",       ["quantum", "cyber"]),
     ("Neural Interface",        ["neural", "cyber", "bio"]),
@@ -74,7 +109,9 @@ class KnowledgeLattice:
                 for t in node["tags"]:
                     if t not in self.golden_ages:
                         self.golden_ages[t] = random.randint(25, 60)
-                        self.events.append(f"GOLDEN AGE: '{t}' triggered by {name} ({node['maturity']:.0f}%)")
+                        fam = TAG_FAMILIES.get(t, "science")
+                        hint = FAMILY_GA_HINTS.get(fam, "")
+                        self.events.append(f"GOLDEN AGE: '{t}' triggered by {name} ({node['maturity']:.0f}%) — {hint}")
 
     def _decay_golden_ages(self):
         expired = [t for t, r in self.golden_ages.items() if r <= 0]
