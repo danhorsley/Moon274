@@ -159,6 +159,16 @@ class PlayerState:
         ability_bonus = self.abilities[primary] * 0.12 + self.abilities[secondary] * 0.06
         effective_diff = max(0.05, difficulty - ability_bonus)
 
+        # Tourist/resident synergy bonus
+        synergy_bonus = 0.0
+        if tourists:
+            synergy_bonus = tourists.get_synergy_bonus(action_type)
+            if synergy_bonus > 0:
+                effective_diff = max(0.05, effective_diff - synergy_bonus)
+                sources = tourists.get_synergy_sources(action_type)
+                names = ", ".join(s[0] for s in sources)
+                events.append(f"  Synergy: {names} (-{synergy_bonus:.0%} difficulty)")
+
         # Connection modifiers
         conn = self.connections.get(target_rival.name) if target_rival else None
         betrayal_mult = 1.0

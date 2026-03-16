@@ -203,6 +203,12 @@ def main():
                 tlog("  CONNECTIONS:", GREEN)
                 for line in player.get_connection_summary(rivals):
                     tlog(line, GREEN)
+                tlog("  RESIDENTS:", HIGHLIGHT)
+                for line in tourists.get_resident_summary():
+                    tlog(line, GREEN)
+                if tourists.residents:
+                    maint = tourists.get_resident_maintenance()
+                    tlog(f"  Total maintenance: {maint:.1f}/tick", DIM_GREEN)
                 if player.research_focus_tag:
                     tlog(f"  Research focus: {player.research_focus_tag.upper()}", CYAN)
                 tlog("  Type STATUS <name> for rival details", DIM_GREEN)
@@ -244,8 +250,16 @@ def main():
                 tlog("  No active bounties. One may appear soon.", DIM_GREEN)
             for b in active:
                 tlog(f"  [{b.timer}t] {b.text}  (${b.reward})", HIGHLIGHT)
-                tlog(f"    From: Node C{b.source_moon} — requires: {b.action_required.upper()}", DIM_GREEN)
+                tlog(f"    From: Node C{b.source_moon}", DIM_GREEN)
+                # Show clear completion instructions
+                if b.action_required == "research" and b.tag:
+                    tlog(f"    To complete: RESEARCH {b.tag.upper()}", GREEN)
+                elif b.target_name:
+                    tlog(f"    To complete: {b.action_required.upper()} {b.target_name}", GREEN)
+                else:
+                    tlog(f"    To complete: {b.action_required.upper()}", GREEN)
             tlog(f"  Completed bounties: {comms.completed_bounties}", GREEN)
+            tlog("  (Complete bounties by performing the action, not RESPOND)", DIM_GREEN)
             tlog("-----------------------", HIGHLIGHT)
             return
 
@@ -253,7 +267,7 @@ def main():
             action, target = args
             # Pass tag for RESEARCH simulations
             sim_tag = target.lower() if target and action == "RESEARCH" else None
-            lines = run_simulate(action, lattice, market, equilibrium, rivals, player, tag=sim_tag)
+            lines = run_simulate(action, lattice, market, equilibrium, rivals, player, tag=sim_tag, tourists=tourists)
             for line in lines:
                 tlog(line, CYAN)
             return
@@ -517,7 +531,7 @@ def main():
                     elif map_result[0] == "route":
                         src, dst = map_result[1], map_result[2]
                         tlog(f"ROUTE: Moon {src} -> Moon {dst}", ROUTE_COLOR)
-                        lines = run_simulate("TRADE", lattice, market, equilibrium, rivals)
+                        lines = run_simulate("TRADE", lattice, market, equilibrium, rivals, player, tourists=tourists)
                         for line in lines:
                             tlog(f"  {line}", CYAN)
 
@@ -652,19 +666,62 @@ def main():
                                 sounds.play("tourist")
                                 comms.set_cooldown(5)
 
+                    # Resident recruitment: offer when Leisure >= 2 and candidates exist
+                    if player.upgrades.get("leisure", 0) >= 2 and random.random() < 0.03:
+                        candidate = tourists.maybe_offer_resident()
+                        if candidate:
+                            from proposals import Proposal
+                            settle_cost = int(candidate["maintenance"] * 100)
+                            cand_name = candidate["name"]
+                            cand_desc = candidate["desc"]
+                            cand_maint = candidate["maintenance"]
+
+                            def _accept_resident(p, eq, _t=tourists, _p=player, _cost=settle_cost):
+                                _p.resources -= _cost
+                                resident, r_events = _t.recruit_resident()
+                                return r_events if resident else [f"  Recruitment failed."]
+
+                            def _deny_resident(p, eq, _name=cand_name):
+                                return [f"  {_name} departs Moon 274. Maybe next time."]
+
+                            p = Proposal(
+                                sender=cand_name,
+                                text=(f"{cand_name} wants to settle at Moon 274. "
+                                      f"{cand_desc}. Cost: ${settle_cost} + {cand_maint:.1f}/tick"),
+                                timer=12,
+                                accept_fn=_accept_resident,
+                                deny_fn=_deny_resident,
+                            )
+                            if comms.add_proposal(p):
+                                tlog(f"COMMS [{p.timer}t]: {p.text}", HIGHLIGHT)
+                                tlog(f"  Type RESPOND ACCEPT or RESPOND DENY", DIM_GREEN)
+                                elog(f"RESIDENT CANDIDATE: {cand_name}", HIGHLIGHT)
+                                sounds.play("tourist")
+                                comms.set_cooldown(10)
+
                 # Generate bounties (~every 20-35 ticks)
                 if not comms.get_active_bounties() and random.random() < 0.04:
                     bounty = generate_bounty(rivals, lattice, tick)
                     if comms.add_bounty(bounty):
                         tlog(f"BOUNTY [{bounty.timer}t]: {bounty.text}", HIGHLIGHT)
                         tlog(f"  Reward: ${bounty.reward} from Node C{bounty.source_moon}", HIGHLIGHT)
-                        tlog(f"  Complete: {bounty.action_required.upper()} {bounty.target_name}", DIM_GREEN)
+                        if bounty.action_required == "research" and bounty.tag:
+                            tlog(f"  To complete: RESEARCH {bounty.tag.upper()}", GREEN)
+                        elif bounty.target_name:
+                            tlog(f"  To complete: {bounty.action_required.upper()} {bounty.target_name}", GREEN)
+                        else:
+                            tlog(f"  To complete: {bounty.action_required.upper()}", GREEN)
                         elog(f"NEW BOUNTY: ${bounty.reward}", HIGHLIGHT)
                         sounds.play("command")
 
                 # 7. Player passive updates
                 for e in player.tick_update():
                     tlog(e, WARN_RED if "LOW" in e or "BANKRUPT" in e else DIM_GREEN)
+
+                # 7a. Resident maintenance cost
+                res_maint = tourists.get_resident_maintenance()
+                if res_maint > 0:
+                    player.resources -= res_maint
 
                 # 7b. Cluster passive: lattice trickle on focus tag
                 trickle = player.cluster_trickle_rate()

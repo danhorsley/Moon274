@@ -76,13 +76,21 @@ def parse_command(raw):
     return None, f"Unknown command: {cmd}"
 
 
-def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=None):
+def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=None,
+                  tourists=None):
     """Run N Monte Carlo previews of an action, return summary string."""
     from equilibrium import ACTION_IMPACTS
     from player import ACTION_ABILITIES, BASE_DIFFICULTY
     delta = ACTION_IMPACTS.get(COMMANDS[action][1], 0.0)
     tags = COMMANDS[action][2]
     eq_action = COMMANDS[action][1]
+
+    # Calculate synergy bonus from tourists/residents
+    synergy_bonus = 0.0
+    synergy_sources = []
+    if tourists:
+        synergy_bonus = tourists.get_synergy_bonus(eq_action)
+        synergy_sources = tourists.get_synergy_sources(eq_action)
 
     # Calculate success rate via Monte Carlo
     successes = 0
@@ -95,9 +103,10 @@ def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=
     for _ in range(SIMULATE_RUNS):
         if player:
             ability_bonus = player.abilities[primary] * 0.12 + player.abilities[secondary] * 0.06
-            eff_diff = max(0.05, base_diff - ability_bonus + player.notoriety * 0.15
-                          if eq_action in ("heist", "eavesdrop", "sabotage", "smuggle")
-                          else base_diff - ability_bonus)
+            eff_diff = max(0.05, base_diff - ability_bonus - synergy_bonus
+                          + (player.notoriety * 0.15
+                             if eq_action in ("heist", "eavesdrop", "sabotage", "smuggle")
+                             else 0))
         else:
             eff_diff = base_diff
 
@@ -123,6 +132,13 @@ def run_simulate(action, lattice, market, equilibrium, rivals, player=None, tag=
                      f"+ {secondary}={player.abilities[secondary]:.2f}")
         if eq_action in ("heist", "eavesdrop", "sabotage", "smuggle"):
             lines.append(f"  Notoriety penalty: +{player.notoriety * 0.15:.2f} difficulty")
+
+    # Synergy factors
+    if synergy_sources:
+        for name, bonus in synergy_sources:
+            lines.append(f"  Synergy: {name} (-{bonus:.0%} difficulty)")
+    elif tourists:
+        lines.append(f"  No synergy active for this action")
 
     # Factor breakdown
     if tags:

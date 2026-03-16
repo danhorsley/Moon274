@@ -374,8 +374,11 @@ def generate_bounty(rivals, lattice, tick):
         tags = list(lattice.get_tags().keys())
         tag = random.choice(tags) if tags else "quantum"
         text = template["text"].format(target=target_rival.name, tag=tag)
+        # Research bounties don't target a rival — just do RESEARCH <tag>
+        bounty_target = None
     else:
         text = template["text"].format(target=target_rival.name)
+        bounty_target = target_rival.name
 
     # Timer scales with difficulty
     timer = 12 if template["action"] in ("heist", "sabotage") else 18
@@ -384,7 +387,7 @@ def generate_bounty(rivals, lattice, tick):
         source_moon=source_moon,
         text=text,
         action_required=template["action"],
-        target_name=target_rival.name,
+        target_name=bounty_target,
         reward=reward,
         timer=timer,
         tag=tag,

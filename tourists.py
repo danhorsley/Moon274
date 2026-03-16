@@ -6,6 +6,35 @@ TOURIST_DEFS = [
     {"name": "Drift Kova",     "origin": 7,   "personality": "chaotic"},
 ]
 
+# ── Tourist synergy: personality -> action difficulty reduction ──
+# When a tourist with this personality is at Moon 274, these actions get easier
+TOURIST_SYNERGY = {
+    "curious":  {"research": 0.06, "trade_idea": 0.05, "broadcast": 0.03},
+    "cautious": {"diplomacy": 0.06, "protect": 0.05, "trade": 0.03},
+    "chaotic":  {"heist": 0.05, "sabotage": 0.06, "smuggle": 0.04, "eavesdrop": 0.03},
+}
+
+# ── Resident system ──
+# Residents are former tourists who settled permanently at Moon 274.
+# Each gives a passive bonus but increases rival attention.
+RESIDENT_DEFS = [
+    {"name": "Dr. Voss",      "personality": "curious",  "specialty": "research",
+     "bonus": {"research": 0.04, "trade_idea": 0.03}, "maintenance": 0.3,
+     "desc": "Xenobiologist — boosts research & trade ideas"},
+    {"name": "Fixer Ren",     "personality": "chaotic",  "specialty": "stealth",
+     "bonus": {"heist": 0.05, "sabotage": 0.04, "smuggle": 0.03}, "maintenance": 0.4,
+     "desc": "Black-market operative — boosts covert ops"},
+    {"name": "Consul Vey",    "personality": "cautious", "specialty": "influence",
+     "bonus": {"diplomacy": 0.05, "trade": 0.04, "protect": 0.02}, "maintenance": 0.3,
+     "desc": "Retired diplomat — boosts diplomacy & trade"},
+    {"name": "Wraith Kael",   "personality": "chaotic",  "specialty": "stealth",
+     "bonus": {"eavesdrop": 0.06, "sabotage": 0.03}, "maintenance": 0.5,
+     "desc": "Signal ghost — boosts eavesdrop, attracts spies"},
+    {"name": "Prof. Luma",    "personality": "curious",  "specialty": "research",
+     "bonus": {"research": 0.05, "broadcast": 0.04}, "maintenance": 0.3,
+     "desc": "Lattice theorist — boosts research & broadcast"},
+]
+
 
 def _random_route(origin, length=6, moon274_weight=1.0):
     """Generate a route of moon IDs (1-274) starting from origin.
@@ -64,9 +93,27 @@ class Tourist:
         return options
 
 
+class Resident:
+    """A former tourist or specialist who settled permanently at Moon 274."""
+    def __init__(self, defn):
+        self.name = defn["name"]
+        self.personality = defn["personality"]
+        self.specialty = defn["specialty"]
+        self.bonus = defn["bonus"]         # dict: action_type -> difficulty reduction
+        self.maintenance = defn["maintenance"]
+        self.desc = defn["desc"]
+
+    def get_bonus(self, action_type):
+        """Return difficulty reduction for this action type (0 if no bonus)."""
+        return self.bonus.get(action_type, 0.0)
+
+
 class TouristEmissaries:
     def __init__(self):
         self.tourists = [Tourist(d) for d in TOURIST_DEFS]
+        self.residents = []  # Resident objects
+        self._resident_pool = list(RESIDENT_DEFS)  # available to recruit
+        random.shuffle(self._resident_pool)
         self.events = []
 
     def move_and_interact(self, game_state):
@@ -112,6 +159,65 @@ class TouristEmissaries:
 
         return self.events, interactions
 
+    def get_synergy_bonus(self, action_type):
+        """Total difficulty reduction from tourists at Moon 274 + residents."""
+        bonus = 0.0
+        # Visiting tourists
+        for t in self.tourists:
+            if t.at_player_moon():
+                synergy = TOURIST_SYNERGY.get(t.personality, {})
+                bonus += synergy.get(action_type, 0.0)
+        # Permanent residents
+        for r in self.residents:
+            bonus += r.get_bonus(action_type)
+        return bonus
+
+    def get_synergy_sources(self, action_type):
+        """Return list of (name, bonus) for an action — for SIMULATE display."""
+        sources = []
+        for t in self.tourists:
+            if t.at_player_moon():
+                synergy = TOURIST_SYNERGY.get(t.personality, {})
+                b = synergy.get(action_type, 0.0)
+                if b > 0:
+                    sources.append((f"{t.name} (visiting)", b))
+        for r in self.residents:
+            b = r.get_bonus(action_type)
+            if b > 0:
+                sources.append((f"{r.name} (resident)", b))
+        return sources
+
+    def get_resident_maintenance(self):
+        """Total per-tick maintenance cost for all residents."""
+        return sum(r.maintenance for r in self.residents)
+
+    def maybe_offer_resident(self):
+        """Check if a new resident can be offered. Returns Resident defn or None."""
+        if not self._resident_pool:
+            return None
+        if len(self.residents) >= 3:  # cap at 3 residents
+            return None
+        return self._resident_pool[0]  # peek at next available
+
+    def recruit_resident(self):
+        """Recruit the next available resident. Returns (Resident, events) or (None, events)."""
+        events = []
+        if not self._resident_pool:
+            events.append("No residents available to recruit.")
+            return None, events
+        if len(self.residents) >= 3:
+            events.append("Moon 274 is at resident capacity (max 3).")
+            return None, events
+        defn = self._resident_pool.pop(0)
+        resident = Resident(defn)
+        self.residents.append(resident)
+        events.append(f"RESIDENT: {resident.name} settles at Moon 274!")
+        events.append(f"  Specialty: {resident.desc}")
+        events.append(f"  Maintenance: {resident.maintenance:.1f}/tick")
+        for action, bonus in resident.bonus.items():
+            events.append(f"  {action}: -{bonus:.0%} difficulty")
+        return resident, events
+
     def get_status(self):
         return [(t.name, t.position, t.personality) for t in self.tourists]
 
@@ -120,3 +226,13 @@ class TouristEmissaries:
 
     def get_routes(self):
         return [t.route for t in self.tourists]
+
+    def get_resident_summary(self):
+        """Summary lines for STATUS display."""
+        lines = []
+        for r in self.residents:
+            bonuses = ", ".join(f"{a}:-{b:.0%}" for a, b in r.bonus.items())
+            lines.append(f"  {r.name:<14} {r.desc[:30]}  ({bonuses})")
+        if not self.residents:
+            lines.append("  (none — BUILD LEISURE to attract candidates)")
+        return lines
